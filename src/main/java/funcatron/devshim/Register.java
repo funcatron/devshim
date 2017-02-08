@@ -3,6 +3,8 @@ package funcatron.devshim;
 import com.fasterxml.jackson.core.JsonParser;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import funcatron.intf.Constants;
+import funcatron.intf.Func;
 import funcatron.intf.impl.ContextImpl;
 import funcatron.intf.impl.Dispatcher;
 
@@ -91,15 +93,39 @@ public class Register {
         register(host, port, funcatronFile, null);
     }
 
-        /**
-         * Register the runtime with the Funcatron development server
-         *
-         * @param host          the host of the funcatron server
-         * @param port          the port of the funcatron server
-         * @param funcatronFile the funcatron.yaml, funcatron.yml, or funcatron.json file
-         * @param propsFile the properties file to be passed to the context
-         */
+    /**
+     * Register the runtime with the Funcatron development server
+     *
+     * @param host          the host of the funcatron server
+     * @param port          the port of the funcatron server
+     * @param funcatronFile the funcatron.yaml, funcatron.yml, or funcatron.json file
+     * @param propsFile     the properties file to be passed to the context
+     */
     public static void register(String host, int port, File funcatronFile, File propsFile)
+            throws IOException {
+
+        register(host, port, ignore -> {
+            try {
+                byte[] ba = readBytes(new FileInputStream(funcatronFile));
+                String contents = new String(ba, "UTF-8");
+                return contents;
+            } catch (RuntimeException re) {
+                throw re;
+            } catch (Exception e) {
+                throw new RuntimeException("Failed to load file "+funcatronFile, e);
+            }
+        }, propsFile);
+    }
+
+    /**
+     * Register the runtime with the Funcatron development server
+     *
+     * @param host          the host of the funcatron server
+     * @param port          the port of the funcatron server
+     * @param swaggerInfo    A function the returns the Swagger file
+     * @param propsFile     the properties file to be passed to the context
+     */
+    public static void register(String host, int port, Function<Void, String> swaggerInfo, File propsFile)
             throws IOException {
         synchronized (syncObj) {
             thePropsFile = propsFile;
@@ -122,7 +148,34 @@ public class Register {
                 // say hello to verify the connection
                 sayHello();
 
-                fileWatcher = new Thread(() -> startWatching(runCount.longValue(), funcatronFile), "Funcatron File Watcher");
+                final long version = runCount.longValue();
+
+                fileWatcher = new Thread(() -> {
+                    String oldSwagger = "";
+                    boolean first = true;
+                    while (version == runCount.longValue()) {
+                        try {
+                            if (!first) Thread.sleep(1000);
+                            else Thread.sleep(100); // give 100 ms to initialize
+                            first = false;
+
+
+                            String contents = swaggerInfo.apply(null);
+                            if (!contents.equals(oldSwagger)) {
+                                oldSwagger = contents;
+                                HashMap<String, Object> msg = new HashMap<>();
+                                msg.put("cmd", "setSwagger");
+                                msg.put("swagger", contents);
+                                sendMessage(msg);
+                            }
+
+                        } catch (InterruptedException ie) {
+                            // no need to log... if our version is wrong, we'll just exit the thread
+                        } catch (IOException ioe) {
+                            logger.log(Level.WARNING, ioe, () -> "Couldn't update");
+                        }
+                    }
+                }, "Funcatron File Watcher");
                 fileWatcher.start();
 
                 Thread t = new Thread(() -> processMessages(runCount.longValue()), "Funcatron Tron Message Processor");
@@ -362,6 +415,27 @@ public class Register {
             }
 
         }
+    }
+
+    /**
+     * Use the Context to read the swagger. Use this for Spring Boot style apps and other apps
+     * where the Swagger information is dynamically generated rather than in a static file.
+     *
+     * @param ignore a void param because Java doesn't have a zero parameter function
+     * @return the String representing the Swagger.
+     */
+    public static String readSwaggerViaContext(Void ignore) {
+        try {
+            Map ret = ContextImpl.runOperation(Constants.GetSwaggerConst, null, Logger.getAnonymousLogger(), Map.class);
+            String swagger = (String) ret.get("swagger");
+            System.out.println("\n\n\n"+swagger+"\n\n\n");
+            return swagger;
+        } catch (RuntimeException re) {
+            throw re;
+        } catch (Exception e) {
+            throw new RuntimeException("Unable to get or serialize Swagger", e);
+        }
+
     }
 
     public static void register(File funcatronFile) throws Exception {
